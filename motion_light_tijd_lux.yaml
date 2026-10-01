@@ -1,0 +1,200 @@
+blueprint:
+  name: Bewegingslicht op tijd en lichtsterkte
+  description: >
+    Zet één of meer lampen aan bij beweging, maar alleen als het donker genoeg is
+    (gemeten lichtsterkte onder een drempel). Helderheid en brandduur hangen af van
+    het dagdeel (dag, avond, nacht). Na het wegvallen van beweging blijft het licht
+    nog een instelbare tijd aan en gaat daarna uit. Nieuwe beweging reset de timer.
+    Zet de helderheid van een dagdeel op 0 om de automatisering in dat dagdeel uit te schakelen.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    apparaten:
+      name: Sensoren en lampen
+      icon: mdi:motion-sensor
+      input:
+        motion_sensor:
+          name: Bewegingssensor
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+                  device_class:
+                    - motion
+                    - occupancy
+                    - presence
+        light_target:
+          name: Lamp(en)
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: light
+        lux_sensor:
+          name: Lichtsensor (optioneel)
+          description: Laat leeg om de lichtsterkte niet te controleren.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: illuminance
+        lux_threshold:
+          name: Luxdrempel
+          description: Het licht gaat alleen aan als de gemeten lichtsterkte hieronder ligt.
+          default: 30
+          selector:
+            number:
+              min: 0
+              max: 2000
+              step: 1
+              unit_of_measurement: lx
+              mode: box
+        transition:
+          name: Overgangstijd
+          default: 1
+          selector:
+            number:
+              min: 0
+              max: 10
+              step: 0.5
+              unit_of_measurement: s
+
+    tijden:
+      name: Dagdelen
+      icon: mdi:clock-outline
+      input:
+        day_start:
+          name: Begin dag
+          default: "07:00:00"
+          selector:
+            time: {}
+        evening_start:
+          name: Begin avond
+          default: "19:00:00"
+          selector:
+            time: {}
+        night_start:
+          name: Begin nacht
+          description: Mag ook na middernacht liggen (bijv. 00:30).
+          default: "23:00:00"
+          selector:
+            time: {}
+
+    dag:
+      name: Instellingen dag
+      icon: mdi:weather-sunny
+      collapsed: true
+      input:
+        day_brightness:
+          name: Helderheid dag
+          default: 100
+          selector:
+            number: { min: 0, max: 100, step: 1, unit_of_measurement: "%" }
+        day_duration:
+          name: Nabrandtijd dag
+          default: 120
+          selector:
+            number: { min: 0, max: 3600, step: 5, unit_of_measurement: s, mode: box }
+
+    avond:
+      name: Instellingen avond
+      icon: mdi:weather-sunset
+      collapsed: true
+      input:
+        evening_brightness:
+          name: Helderheid avond
+          default: 60
+          selector:
+            number: { min: 0, max: 100, step: 1, unit_of_measurement: "%" }
+        evening_duration:
+          name: Nabrandtijd avond
+          default: 180
+          selector:
+            number: { min: 0, max: 3600, step: 5, unit_of_measurement: s, mode: box }
+
+    nacht:
+      name: Instellingen nacht
+      icon: mdi:weather-night
+      collapsed: true
+      input:
+        night_brightness:
+          name: Helderheid nacht
+          default: 10
+          selector:
+            number: { min: 0, max: 100, step: 1, unit_of_measurement: "%" }
+        night_duration:
+          name: Nabrandtijd nacht
+          default: 60
+          selector:
+            number: { min: 0, max: 3600, step: 5, unit_of_measurement: s, mode: box }
+
+mode: restart
+max_exceeded: silent
+
+triggers:
+  - trigger: state
+    entity_id: !input motion_sensor
+    from: "off"
+    to: "on"
+
+variables:
+  lights: !input light_target
+  lux_sensor: !input lux_sensor
+  lux_threshold: !input lux_threshold
+  transition: !input transition
+  day_start: !input day_start
+  evening_start: !input evening_start
+  night_start: !input night_start
+  day_brightness: !input day_brightness
+  evening_brightness: !input evening_brightness
+  night_brightness: !input night_brightness
+  day_duration: !input day_duration
+  evening_duration: !input evening_duration
+  night_duration: !input night_duration
+  period: >
+    {% set n = now().strftime('%H:%M:%S') %}
+    {% if n >= day_start and n < evening_start %}dag
+    {% elif night_start > evening_start %}
+      {% if n >= evening_start and n < night_start %}avond{% else %}nacht{% endif %}
+    {% else %}
+      {% if n >= evening_start or n < night_start %}avond{% else %}nacht{% endif %}
+    {% endif %}
+  brightness: >
+    {{ {'dag': day_brightness, 'avond': evening_brightness, 'nacht': night_brightness}[period | trim] }}
+  duration: >
+    {{ {'dag': day_duration, 'avond': evening_duration, 'nacht': night_duration}[period | trim] }}
+
+conditions:
+  # Dagdeel niet uitgeschakeld (helderheid > 0)
+  - condition: template
+    value_template: "{{ brightness | int(0) > 0 }}"
+  # Donker genoeg, of lamp brandt al (anders meet de sensor het eigen lamplicht en
+  # zou het licht uitgaan terwijl er nog beweging is)
+  - condition: template
+    value_template: >
+      {{ lux_sensor in ['', none]
+         or states(lux_sensor) in ['unknown', 'unavailable']
+         or states(lux_sensor) | float(0) < lux_threshold | float(0)
+         or lights | select('is_state', 'on') | list | count > 0 }}
+
+actions:
+  - action: light.turn_on
+    target:
+      entity_id: "{{ lights }}"
+    data:
+      brightness_pct: "{{ brightness | int }}"
+      transition: "{{ transition }}"
+  - wait_for_trigger:
+      - trigger: state
+        entity_id: !input motion_sensor
+        from: "on"
+        to: "off"
+  - delay:
+      seconds: "{{ duration | int }}"
+  - action: light.turn_off
+    target:
+      entity_id: "{{ lights }}"
+    data:
+      transition: "{{ transition }}"
